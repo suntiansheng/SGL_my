@@ -1,0 +1,240 @@
+## utf8
+
+##generate data
+rm(list = ls())
+gc()
+library(Rfast)
+library(SGL)
+library(cvxclustr)
+set.seed(4)
+creat_Sigma <- function(p, phi){
+  Sigma <- matrix(data = NA, nrow = p, ncol = p)
+  for(i in 1:p){
+    for(j in 1:p){
+      Sigma[i,j] <- phi^(abs(i - j)) 
+    }
+  }
+  return(Sigma)
+}
+
+sigma1 <- creat_Sigma(50,0.9)
+sigma2 <- creat_Sigma(50,0.9)
+sigma3 <- creat_Sigma(50,0.9)
+Sigma <- matrix(data = 0, nrow = 150, ncol = 150)
+
+###three groups
+Sigma[1:50,1:50] <- sigma1
+Sigma[51:100,51:100] <- sigma2
+Sigma[101:150,51:150] <- sigma3
+
+
+
+creat_dataset_mu <- function(Sigma, mu, n){
+  B <- chol(Sigma)
+  p <- dim(B)[1]
+  X <- matrix(rnorm(n*p),n,p)%*%B # generate X matrix
+  epsilon <- rnorm(n) # generate epsilon
+  c <- c(2, 0.5, 3,2, 0.5, 3,2, 0.5, 3)
+  coef <- c
+  
+  Y <- mu + coef[1]*X[,1] + coef[2]*X[,2] + coef[3]*X[,3] + 
+    coef[4]*X[,51] + coef[5]*X[,52] + coef[6]*X[,53] + 
+    coef[7]*X[,101] + coef[8]*X[,102] + coef[9]*X[,103] + epsilon
+  dataset <- data.frame(Y,X)
+  return(dataset)
+}
+
+
+
+n <- 100
+data_mu1 <- creat_dataset_mu(Sigma, 0, n)
+data_mu2 <- creat_dataset_mu(Sigma, 2, n)
+data_mu3 <- creat_dataset_mu(Sigma, 4, n)
+
+dataset <- rbind(data_mu1, data_mu2, data_mu3)
+
+## DC-SIS
+
+
+p <- dim(Sigma)[1]
+Y = dataset[,1];X = dataset[,-1]
+
+dc <- NULL
+for(j in 1:p){
+  dc_res <- dcor(Y,X[,j])$dcor
+  dc[j] <- dc_res
+}
+
+
+index <- 1:p
+dc_df <- data.frame(index = index, dc = dc)
+dc_df <- dc_df[order(dc_df$dc,decreasing = T),]
+
+k = round(p/log(p))
+
+rough_select <- dc_df[1:k,]$index
+
+X_rough <- X[,rough_select]
+X_rough <- scale(X_rough)
+colnames(X_rough)
+
+## convex clustering##
+len <- dim(X_rough)[1]
+
+k <- 5
+phi <- 0.001
+mu <- ncol(X_rough)
+w <- kernel_weights(X_rough,phi)### Pick some weights and a sequence of regularization parameters.
+w <- knn_weights(w,k,mu)
+gamma <- seq(0.0,4300, length.out=100)
+nu <- AMA_step_size(w,mu)## Perform clustering
+sol <- cvxclust_path_ama(X_rough,w,gamma,nu=nu)
+
+A <- create_adjacency(sol$V[[100]],w,mu)### Construct adjacency matrix
+f1 <- find_clusters(A)
+
+cluster <- f1$cluster
+
+for(i in unique(cluster)){
+  print(colnames(X_rough)[cluster == i])
+}
+
+mean(Y[1:100])
+mean(Y[101:200])
+mean(Y[201:300])
+
+#gl_l <- list(x=X_rough,y=Y)
+#gl <- SGL(gl_l, cluster)
+#gl$beta[,2]
+#library(ggplot2)
+
+#gl$intercept
+
+delta_f <- function(n){
+  len <- (n*n - n)/2
+  index <- 1
+  mat <- matrix(data = 0,nrow = len, ncol = n)
+  for(i in 1:(n-1)){
+    for(j in (i+1):n){
+      mat[index,i] <- 1
+      mat[index,j] <- -1
+      index <- index + 1
+    }
+  }
+  return(mat)
+}
+
+ST <- function(t, lambda){
+  res <- max(0, abs(t) - lambda)
+  return(sign(t)*res)
+}
+
+MCP <- function(t, lambda, gamma,rho){
+  if(abs(t) <= gamma*lambda){
+    t <- ST(t, (lambda/rho))/(1 - 1/(lambda*rho))
+  }else{
+    t <- t
+  }
+  return(t)
+}
+
+
+SCAD <- function(t, lambda, gamma, rho){
+  if(abs(t) <= (lambda + lambda/rho)){
+    t <- ST(t, lambda/rho)
+  }
+  else if(abs(t) > gamma*lambda){
+    t <- t
+  }
+  else{
+    t <- ST(t, gamma*lambda/((gamma-1)*rho))/(1 - 1/((gamma-1)*rho))
+  }
+  return(t)
+}
+#c <- matrix(c(1,2,3,4),ncol = 1)
+#delta_f(4) %*% c
+#eta_f(c)
+
+
+bicluster <- function(X, Y, index,iter){
+  '
+  X: covarites
+  Y: response
+  index: group lasso index
+  iter: maximun number of iteration
+  ve : dual variables
+  rho: stepsize 
+  lambda: MCP penalty
+  '
+  rho = 0.5
+  lambda = 3.5 
+  gamma = 1/rho + 5
+  n <- dim(X)[1]
+  #mu_path <- matrix(nrow = obs_num, ncol = iter+1)
+  #X <- scale(X) #scale X
+  #Ve <- matrix(rnorm((n*n - n)/2), ncol = 1)
+  Ve <- matrix(rep(0,(n*n - n)/2), ncol = 1)
+  Delta <- delta_f(n)
+  ## given group lasso index, using ols to estimate beta_0
+  Beta <- solve(t(X)%*%X) %*% t(X)%*%Y
+  Mu <- Y - X%*%Beta
+  #Eta <- eta_f(Mu)
+  Eta_0 <- Delta %*% Mu
+  coln <- colnames(X)
+  index_df = cbind(coln, index)
+  pr_c <- c()
+  du_c <- c()
+  for(i in 1:iter){
+    ## solve mu
+    Del_m <- n*diag(nrow = n) - matrix(rep(1,n), ncol = 1)%*%matrix(rep(1,n), nrow = 1)
+    Q_x <- X %*% solve(t(X)%*%X) %*% t(X)
+    Mu <- solve(diag(nrow = n) + rho*Del_m - Q_x) %*% ((diag(nrow = n)-Q_x)%*%Y + rho*t(Delta)%*%(Eta_0 - (1/rho)*Ve))
+    
+    ##solve beta cluster
+    Y_demean <- Y - mean(Y)
+    datalist <- list(x = X, y = Y_demean)
+    
+    #index_df[,1]%in% coln
+    index = index_df[index_df[,1]%in% coln,2]
+    Fit1 <- SGL(datalist, index = index, type = 'linear')
+    ##选择beta需要有更好的方法，这里直接选择最中间的那个beta,以这个beta不为0的项为基准，作为接下来拟合ols的依据
+    p <- dim(X)[2]
+    beta_index <- 1:p
+    beta_df <- cbind(Fit1$beta[,10], beta_index)
+    X_sel_index <- beta_df[beta_df[,1] != 0, 2]
+    X_sel <- X[,X_sel_index]
+    
+    
+    ##回归前对Ydemean
+    ##去掉均值的Y回归估计beta真值
+    #X_lm <- as.data.frame(cbind(Y_demean, X_sel))
+    #lmfit <- lm(Y_demean ~.-1, data = X_lm)#无截距项
+    #Y_pred <- predict(lmfit, X_lm[,-1])
+    #Y_res <- Y - Y_pred
+    X <- X_sel
+    coln <- colnames(X)
+    ##update Eta
+    Kpa <- Delta%*%Mu + (1/rho)*Ve
+    Eta_1 <- matrix(apply(Kpa, 1, MCP, lambda, gamma, rho), ncol = 1)
+    Ve <- Ve + rho*(Delta%*%Mu - Eta_1)
+    
+    dual_condition <- Delta%*%Mu - Eta_1
+    prime_condition <- rho*t(Delta)%*%(Eta_1 - Eta_0)
+    Eta_0 <- Eta_1
+    pr_c <- cbind(median(prime_condition), pr_c)
+    du_c <- cbind(median(dual_condition), du_c)
+  }
+  
+  return(list(mu = Mu, beta = coln, dual = du_c, pr = pr_c))
+}
+
+res <- bicluster(X_rough,Y,cluster,1)  
+res$mu
+res$dual
+res$pr
+#length(unique(res$mu))
+
+mean(res$mu[1:100])
+mean(res$mu[101:200])
+mean(res$mu[201:300])
+

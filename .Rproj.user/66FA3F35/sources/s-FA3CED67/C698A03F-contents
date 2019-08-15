@@ -1,0 +1,72 @@
+bicluster <- function(X, Y, index,iter, rho, lambda, gamma){
+  '
+  X: covarites
+  Y: response
+  index: group lasso index
+  iter: maximun number of iteration
+  ve : dual variables
+  rho: stepsize 
+  lambda: MCP penalty
+  '
+  n <- dim(X)[1]
+  p <- dim(X)[2]
+  mu_path <- matrix(nrow = n, ncol = iter)
+  beta_path <- matrix(nrow = p, ncol = iter)
+  Ve <- matrix(rep(0,(n*n - n)/2), ncol = 1)
+  Delta <- delta_f(n)
+  ## given group lasso index, using ols to estimate beta_0
+  Beta <- solve(t(X)%*%X) %*% t(X)%*%Y
+  Mu <- Y - X%*%Beta
+  #Eta <- eta_f(Mu)
+  Eta_0 <- Delta %*% Mu
+  
+  pr_c <- c()
+  du_c <- c()
+  for(i in 1:iter){
+    ## solve mu
+    Del_m <- n*diag(nrow = n) - matrix(rep(1,n), ncol = 1)%*%matrix(rep(1,n), nrow = 1)
+    Mu <- solve(diag(nrow = n) + rho*Del_m) %*% (Y - X%*%Beta + rho*t(Delta)%*%(Eta_0 - (1/rho)*Ve))
+    
+    ##solve beta cluster
+    Y_demean <- Y - Mu
+    datalist <- list(x = X, y = Y_demean)
+    Fit1 <- cvSGL(datalist, index = index, type = 'linear')
+    beta_index <- which.min(Fit1$lldiff)
+    res_beta <- Fit1$fit$beta[,beta_index]
+    Beta <- matrix(res_beta,ncol = 1)
+    ##update Eta
+    Kpa <- Delta%*%Mu + (1/rho)*Ve
+    Eta_1 <- matrix(apply(Kpa, 1, MCP, lambda, gamma, rho), ncol = 1)
+    Ve <- Ve + rho*(Delta%*%Mu - Eta_1)
+    
+    dual_condition <- Delta%*%Mu - Eta_1
+    prime_condition <- rho*t(Delta)%*%(Eta_1 - Eta_0)
+    Eta_0 <- Eta_1
+    pr_c <- cbind(sum((prime_condition)^2), pr_c)
+    du_c <- cbind(sum((dual_condition)^2), du_c)
+    #print(dim(Mu))
+    #print(dim(mu_path))
+    mu_path[,i] <- Mu
+    beta_path[,i] <- Beta
+  }
+  
+  return(list(mu = Mu, beta = Beta, dual = du_c, pr = pr_c, mu_path = mu_path, beta_path = beta_path))
+}
+
+
+rho = 0.1
+lambda = 0.6
+gamma = 0.3
+iter = 3
+res1 <- bicluster(X_rough, Y, cluster, iter,rho, lambda, gamma)  
+
+res1$mu
+res1$dual
+res1$pr
+res1$beta
+
+
+gl_l <- list(x=X_rough,y=Y)
+gl <- cvSGL(gl_l, cluster, type = 'linear')
+beta_k <- which.min(gl$lldiff)
+gl$fit$beta[,beta_k]
